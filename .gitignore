@@ -1,4 +1,21 @@
-.paddlex/
-venv/
+# PaddleOCRのダウンロード済みモデル（巨大・環境ごとに自動取得されるため管理不要）
 models/
+
+# 実行時に生成される中間データ（領収書の内容を含むため個人情報保護の観点からも管理しない）
+ocr_positions.json
+marked/
+
+# テスト用画像フォルダ（領収書の実データを含むため管理しない）
+test/
+
+# Python
 __pycache__/
+*.pyc
+.venv/
+venv/
+
+# OS / エディタ
+.DS_Store
+Thumbs.db
+.vscode/
+.idea/

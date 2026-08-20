@@ -1,0 +1,9 @@
+# PaddleOCR本体と推論エンジン
+paddlepaddle>=2.6.0
+paddleocr>=2.8.0
+
+# 画像読み込み・矩形マーキング
+pillow>=10.0.0
+
+# CSVフィールドとOCRテキストのあいまい一致
+rapidfuzz>=3.0.0
