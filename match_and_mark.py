@@ -48,6 +48,8 @@ FIELD_COLORS = {
 
 FUZZY_FIELDS = ("description", "ship_to_name")
 
+_IMAGE_EXTS = (".jpg", ".jpeg", ".png", ".bmp", ".tif", ".tiff")
+
 
 # ──────────────────────────────────────────────
 #  CSV / JSON 読み込み
@@ -87,6 +89,17 @@ def load_positions_json(path: str) -> Dict[str, Any]:
         return json.load(f)
 
 
+def _find_image_by_index(images_dir: str, index: int) -> Optional[str]:
+    """OCR実行時に画像は "{index}.拡張子" にリネーム済みのはずなので、
+    JSON内のfile_nameを鵜呑みにせず、まずインデックス番号から直接ファイルを特定する。
+    """
+    for ext in _IMAGE_EXTS:
+        candidate = os.path.join(images_dir, f"{index}{ext}")
+        if os.path.exists(candidate):
+            return candidate
+    return None
+
+
 def _index_images(data: Dict[str, Any]) -> Dict[int, Dict[str, Any]]:
     result = {}
     for rec in data.get("images", []):
@@ -95,6 +108,22 @@ def _index_images(data: Dict[str, Any]) -> Dict[int, Dict[str, Any]]:
         except (KeyError, ValueError, TypeError):
             continue
     return result
+
+
+def _parse_row_index(raw: str) -> Optional[tuple]:
+    """CSVのIndex値をパースする。
+    軽減税率混在で分割された行は「3.5」のように小数で返ってくるが、
+    対応する画像は整数部（3）のものなので、画像を引くためのキーと
+    表示用のラベル（元の文字列）を別に返す。
+    """
+    raw = (raw or "").strip()
+    if not raw:
+        return None
+    try:
+        value = float(raw)
+    except ValueError:
+        return None
+    return int(value), raw
 
 
 # ──────────────────────────────────────────────
@@ -237,7 +266,12 @@ def match_fields(image_record: Dict[str, Any], csv_row: Dict[str, str]) -> Dict[
 # ──────────────────────────────────────────────
 #  画像への矩形マーキング
 # ──────────────────────────────────────────────
-def mark_image(image_path: str, matches: Dict[str, Dict[str, Any]], out_path: str) -> None:
+def mark_image(image_path: str, entries: List[Dict[str, Any]], out_path: str) -> None:
+    """entries: [{"field":.., "box":.., "label":..}, ...]
+    1枚の画像に複数CSV行分のマークをまとめて描画できるよう、
+    フィールド名固定のdictではなくリスト形式で受け取る
+    （軽減税率混在で1画像に2行が対応するケースをマージするため）。
+    """
     img = Image.open(image_path).convert("RGB")
     draw = ImageDraw.Draw(img)
     try:
@@ -245,14 +279,14 @@ def mark_image(image_path: str, matches: Dict[str, Dict[str, Any]], out_path: st
     except Exception:
         font = None
 
-    for field, m in matches.items():
-        box = m.get("box")
+    for entry in entries:
+        box = entry.get("box")
         if not box:
             continue
         x1, y1, x2, y2 = box
-        color = FIELD_COLORS.get(field, "#000000")
+        color = FIELD_COLORS.get(entry.get("field"), "#000000")
         draw.rectangle([x1, y1, x2, y2], outline=color, width=3)
-        label = field
+        label = entry.get("label", entry.get("field", ""))
         label_y = max(0, y1 - 14)
         draw.text((x1, label_y), label, fill=color, font=font)
 
@@ -295,48 +329,75 @@ def run_from_rows(csv_rows: List[Dict[str, str]], data: Dict[str, Any],
         "skipped_no_image": [],
         "field_match_counts": {f: 0 for f in field_names},
         "unmatched": [],  # [{"index":.., "fields":[...]}]
+        "index_filename_mismatch": [],  # [{"index":.., "expected":.., "found":..}]
         "output_files": [],
     }
 
     os.makedirs(out_dir, exist_ok=True)
 
+    # 軽減税率混在で分割された行（例: 3, 3.5）は同じ画像を指すため、
+    # 画像インデックスごとに行をグルーピングしてから1回だけマーク画像を出力する。
+    groups: Dict[int, List[Any]] = {}
     for row in csv_rows:
-        try:
-            idx = int(str(row.get("Index", "")).strip())
-        except ValueError:
+        parsed = _parse_row_index(row.get("Index", ""))
+        if parsed is None:
             summary["skipped_no_image"].append(row.get("Index", ""))
             continue
+        image_idx, raw_label = parsed
+        groups.setdefault(image_idx, []).append((raw_label, row))
 
-        image_record = images_by_index.get(idx)
+    for image_idx, rows_for_image in groups.items():
+        image_record = images_by_index.get(image_idx)
         if image_record is None:
-            summary["skipped_no_image"].append(idx)
+            summary["skipped_no_image"].extend(raw_label for raw_label, _ in rows_for_image)
             continue
 
-        image_path = os.path.join(images_dir, image_record["file_name"])
-        if not os.path.exists(image_path):
-            summary["skipped_no_image"].append(idx)
+        # ファイル名とインデックスの突合: リネーム後は "{index}.拡張子" のはずなので、
+        # まずインデックスから実ファイルを特定し、JSON記載のfile_nameと一致するか確認する。
+        # 食い違う場合は画像フォルダがJSON生成後に入れ替わっている等の可能性があるため、
+        # 誤った画像へのマーキングを避けて未処理として報告する。
+        image_path = _find_image_by_index(images_dir, image_idx)
+        if image_path is None:
+            summary["skipped_no_image"].extend(raw_label for raw_label, _ in rows_for_image)
+            continue
+        if os.path.basename(image_path) != image_record["file_name"]:
+            summary["index_filename_mismatch"].append({
+                "index": image_idx,
+                "expected": image_record["file_name"],
+                "found": os.path.basename(image_path),
+            })
+            summary["skipped_no_image"].extend(raw_label for raw_label, _ in rows_for_image)
             continue
 
-        matches = match_fields(image_record, row)
+        multi = len(rows_for_image) > 1
+        mark_entries: List[Dict[str, Any]] = []
 
-        unmatched_fields = []
-        for f in field_names:
-            if f == "invoice_registered" and not _is_truthy(row.get(f, "")):
-                continue
-            if not (row.get(f, "") or "").strip():
-                continue
-            if f in matches:
-                summary["field_match_counts"][f] += 1
-            else:
-                unmatched_fields.append(f)
-        if unmatched_fields:
-            summary["unmatched"].append({"index": idx, "fields": unmatched_fields})
+        for raw_label, row in rows_for_image:
+            matches = match_fields(image_record, row)
+
+            unmatched_fields = []
+            for f in field_names:
+                if f == "invoice_registered" and not _is_truthy(row.get(f, "")):
+                    continue
+                if not (row.get(f, "") or "").strip():
+                    continue
+                if f in matches:
+                    summary["field_match_counts"][f] += 1
+                else:
+                    unmatched_fields.append(f)
+            if unmatched_fields:
+                summary["unmatched"].append({"index": raw_label, "fields": unmatched_fields})
+
+            for field, m in matches.items():
+                label = f"{field}({raw_label})" if multi else field
+                mark_entries.append({"field": field, "box": m["box"], "label": label})
+
+            summary["processed"] += 1
 
         base, ext = os.path.splitext(image_record["file_name"])
         out_path = os.path.join(out_dir, f"{base}_marked{ext}")
-        mark_image(image_path, matches, out_path)
+        mark_image(image_path, mark_entries, out_path)
         summary["output_files"].append(out_path)
-        summary["processed"] += 1
 
     return summary
 

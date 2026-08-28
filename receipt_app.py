@@ -20,6 +20,8 @@ sys.stdout.reconfigure(encoding='utf-8', errors='replace')
 
 import os
 import json
+import queue
+import threading
 import traceback
 import webbrowser
 from typing import Any, Dict, List, Optional
@@ -76,7 +78,8 @@ class ReceiptApp(tk.Tk):
 
         row2 = ttk.Frame(step1)
         row2.pack(fill="x", padx=6, pady=4)
-        ttk.Button(row2, text="① OCR実行", command=self.on_step1).pack(side="left")
+        self.step1_btn = ttk.Button(row2, text="① OCR実行", command=self.on_step1)
+        self.step1_btn.pack(side="left")
         self.step1_progress = ttk.Progressbar(row2, mode="determinate")
         self.step1_progress.pack(side="left", fill="x", expand=True, padx=(8, 0))
 
@@ -108,29 +111,47 @@ class ReceiptApp(tk.Tk):
     # ──────────────────────────────
     # ① OCR実行
     # ──────────────────────────────
-    def _get_extractor(self, model_dir: str):
+    def _get_extractor(self, model_dir: str, status_queue: Optional["queue.Queue"] = None):
         """PaddleOCRはモデルパスを import 時の環境変数でしか読まないため、
         ユーザーがモデルフォルダを指定・変更できるよう ocr_positions の import 自体を遅延させる。
         一度初期化した後にモデルフォルダを変更した場合は、アプリの再起動が必要。
+
+        バックグラウンドスレッドから呼ばれる場合があるため、ここではUIに直接触れず、
+        状態通知は status_queue 経由（未指定時のみメインスレッド直接更新）で行う。
         """
         if self._extractor is not None:
-            if self._extractor_model_dir != model_dir:
-                messagebox.showwarning(
-                    "モデルフォルダ",
-                    "モデルフォルダの変更を反映するにはアプリの再起動が必要です。\n"
-                    f"現在使用中: {self._extractor_model_dir}"
-                )
             return self._extractor
 
         os.environ["PADDLE_PDX_CACHE_HOME"] = model_dir
         global OcrPositionExtractor, save_json
         from ocr_positions import OcrPositionExtractor, save_json  # noqa: F401
 
-        self.step1_status.set("PaddleOCR 初期化中…（初回のみ時間がかかります）")
-        self.update_idletasks()
+        if status_queue is not None:
+            status_queue.put(("status", "PaddleOCR 初期化中…（初回のみ時間がかかります）"))
+        else:
+            self.step1_status.set("PaddleOCR 初期化中…（初回のみ時間がかかります）")
+            self.update_idletasks()
         self._extractor = OcrPositionExtractor()
         self._extractor_model_dir = model_dir
         return self._extractor
+
+    def _rename_images_sequentially(self, images_dir: str, image_paths: List[str]) -> List[str]:
+        """OCR処理前に画像ファイルを 1,2,3... の連番にリネームする（拡張子は維持）。
+        一時名を経由してからリネームすることで、既存のファイル名との衝突を避ける。
+        """
+        temp_entries = []
+        for i, path in enumerate(image_paths, start=1):
+            ext = os.path.splitext(path)[1]
+            temp_path = os.path.join(images_dir, f"__renaming_{i}{ext}")
+            os.rename(path, temp_path)
+            temp_entries.append((temp_path, ext))
+
+        final_paths = []
+        for i, (temp_path, ext) in enumerate(temp_entries, start=1):
+            final_path = os.path.join(images_dir, f"{i}{ext}")
+            os.rename(temp_path, final_path)
+            final_paths.append(final_path)
+        return final_paths
 
     def on_step1(self):
         images_dir = self.images_dir_var.get().strip()
@@ -151,20 +172,49 @@ class ReceiptApp(tk.Tk):
             messagebox.showerror("エラー", "画像フォルダ内に画像ファイルが見つかりません。")
             return
 
+        if self._extractor is not None and self._extractor_model_dir != model_dir:
+            messagebox.showwarning(
+                "モデルフォルダ",
+                "モデルフォルダの変更を反映するにはアプリの再起動が必要です。\n"
+                f"現在使用中: {self._extractor_model_dir}"
+            )
+
         try:
-            extractor = self._get_extractor(model_dir)
+            image_paths = self._rename_images_sequentially(images_dir, image_paths)
         except Exception as e:
             traceback.print_exc()
-            messagebox.showerror("初期化エラー", f"PaddleOCRの初期化に失敗しました。\n{e}")
+            messagebox.showerror("リネームエラー", f"画像ファイルのリネームに失敗しました。\n{e}")
             return
 
+        self.step1_btn.config(state="disabled")
         self.step1_progress["maximum"] = len(image_paths)
         self.step1_progress["value"] = 0
+        self.step1_status.set(f"OCR準備中…（{len(image_paths)}枚）")
+
+        self._step1_queue: "queue.Queue" = queue.Queue()
+        threading.Thread(
+            target=self._step1_worker,
+            args=(model_dir, image_paths),
+            daemon=True,
+        ).start()
+        self.after(5000, self._poll_step1_queue)
+
+    def _step1_worker(self, model_dir: str, image_paths: List[str]):
+        """①のOCRループ本体。PaddleOCRの処理はCPU/IOで数秒〜数十秒かかるため、
+        メインスレッド（UI）をブロックしないよう別スレッドで実行する。
+        UI操作は一切行わず、進捗はキュー経由でメインスレッドに通知する。
+        """
+        q = self._step1_queue
+        try:
+            extractor = self._get_extractor(model_dir, status_queue=q)
+        except Exception as e:
+            traceback.print_exc()
+            q.put(("error", f"PaddleOCRの初期化に失敗しました。\n{e}"))
+            return
 
         images_result = []
         for i, path in enumerate(image_paths, start=1):
-            self.step1_status.set(f"OCR処理中 {i}/{len(image_paths)}: {os.path.basename(path)}")
-            self.update_idletasks()
+            q.put(("progress", i, os.path.basename(path)))
             try:
                 rec = extractor.process_one(i, path)
             except Exception as e:
@@ -172,9 +222,36 @@ class ReceiptApp(tk.Tk):
                 rec = {"index": i, "file_name": os.path.basename(path),
                        "width": None, "height": None, "items": [], "error": str(e)}
             images_result.append(rec)
-            self.step1_progress["value"] = i
-            self.update_idletasks()
 
+        q.put(("done", images_result))
+
+    def _poll_step1_queue(self):
+        q = self._step1_queue
+        try:
+            while True:
+                msg = q.get_nowait()
+                kind = msg[0]
+                if kind == "status":
+                    self.step1_status.set(msg[1])
+                elif kind == "progress":
+                    i, name = msg[1], msg[2]
+                    self.step1_progress["value"] = i
+                    total = int(self.step1_progress["maximum"])
+                    self.step1_status.set(f"OCR処理中 {i}/{total}: {name}")
+                elif kind == "error":
+                    self.step1_btn.config(state="normal")
+                    messagebox.showerror("初期化エラー", msg[1])
+                    self.step1_status.set("エラーで中断しました。")
+                    return
+                elif kind == "done":
+                    self.step1_btn.config(state="normal")
+                    self._finish_step1(msg[1])
+                    return
+        except queue.Empty:
+            pass
+        self.after(5000, self._poll_step1_queue)
+
+    def _finish_step1(self, images_result: List[Dict[str, Any]]):
         try:
             with open(_PROMPT_TEMPLATE_PATH, "r", encoding="utf-8") as f:
                 instructions = f.read()
@@ -201,14 +278,26 @@ class ReceiptApp(tk.Tk):
             pass
 
         self.step1_status.set(
-            f"完了（{len(image_paths)}枚）: {_JSON_PATH}（プロンプト込みJSONをクリップボードにコピー済み）")
+            f"完了（{len(images_result)}枚）: {_JSON_PATH}（プロンプト込みJSONをクリップボードにコピー済み）")
 
     def _copy_json_to_clipboard(self, data: Dict[str, Any]):
         """プロンプト（instructions）とOCR結果（images）を1つに含んだJSONを
-        そのままクリップボードにコピーする。claude.aiには貼り付けるだけでよい。"""
+        クリップボードにコピーする。claude.aiには貼り付けるだけでよい。
+
+        JSON内に埋め込まれた指示（instructions）だけだと、チャット本文が空のまま
+        貼り付けた場合にClaude側が「実行してよいか」確認を挟むことがあるため、
+        貼り付けた瞬間にチャット本文として見える明示的な一行を先頭に添えて、
+        確認なしで一発でCSVが出力されるようにする。
+        """
         json_text = json.dumps(data, ensure_ascii=False, indent=2)
+        lead_in = (
+            "以下のJSONの instructions フィールドに従って、"
+            "CSVのみをMarkdownのコードブロックで出力してください。"
+            "確認や質問は不要です。\n\n"
+        )
+        full_text = lead_in + json_text
         self.clipboard_clear()
-        self.clipboard_append(json_text)
+        self.clipboard_append(full_text)
         self.update()
 
     # ──────────────────────────────
@@ -320,6 +409,14 @@ class ReceiptApp(tk.Tk):
                 lines.append(f"  Index {u['index']}: {', '.join(u['fields'])}")
             if len(unmatched) > 5:
                 lines.append(f"  …他 {len(unmatched) - 5} 行")
+        mismatches = result.get("index_filename_mismatch", [])
+        if mismatches:
+            lines.append(f"ファイル名とIndexの不一致: {len(mismatches)}件（画像フォルダが①実行時と異なる可能性）")
+            for m in mismatches[:5]:
+                lines.append(f"  Index {m['index']}: JSON記載={m['expected']} / 実ファイル={m['found']}")
+            if len(mismatches) > 5:
+                lines.append(f"  …他 {len(mismatches) - 5} 件")
+
         skipped = result.get("skipped_no_image", [])
         if skipped:
             lines.append(f"画像が見つからずスキップ: {skipped}")
