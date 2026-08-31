@@ -38,6 +38,10 @@ from PIL import Image, ImageDraw, ImageFont
 
 FUZZY_THRESHOLD = 80  # RapidFuzz WRatio は0〜100
 
+# claude.aiのCSVダウンロード機能が空文字列セルを含む行を落とす事象への対処として、
+# プロンプト側で「空欄」の代わりに出力させている全角ハイフン。読み込み直後に空文字列へ戻す。
+_BLANK_PLACEHOLDER = "－"
+
 FIELD_COLORS = {
     "description":    "#2e7d32",  # 緑
     "total_amount":   "#c62828",  # 赤
@@ -70,18 +74,18 @@ def parse_claude_csv_text(text: str) -> List[Dict[str, str]]:
     if not text:
         return []
     rows = list(csv.DictReader(io.StringIO(text)))
+    for row in rows:
+        for key, value in row.items():
+            if value is not None and value.strip() == _BLANK_PLACEHOLDER:
+                row[key] = ""
     return rows
 
 
 def load_claude_csv(path: str) -> List[Dict[str, str]]:
-    for encoding in ("utf-8-sig", "cp932"):
-        try:
-            with open(path, "r", newline="", encoding=encoding) as f:
-                text = f.read()
-            return parse_claude_csv_text(text)
-        except UnicodeDecodeError:
-            continue
-    raise ValueError(f"CSVを読み込めませんでした（utf-8-sig/cp932とも失敗）: {path}")
+    # claude.aiにはCSVをShift-JIS(cp932)で出力するよう指示しているため、それを前提に読む。
+    with open(path, "r", newline="", encoding="cp932") as f:
+        text = f.read()
+    return parse_claude_csv_text(text)
 
 
 def load_positions_json(path: str) -> Dict[str, Any]:
