@@ -292,7 +292,7 @@ class ReceiptApp(tk.Tk):
         json_text = json.dumps(data, ensure_ascii=False, indent=2)
         lead_in = (
             "以下のJSONの instructions フィールドに従って、"
-            "CSVのみをMarkdownのコードブロックで出力してください。"
+            "CSVのみを出力してください。"
             "確認や質問は不要です。\n\n"
         )
         full_text = lead_in + json_text
