@@ -7,7 +7,9 @@ invoice_registered,warning_flag）と、ocr_positions.py が生成した位置�
 突き合わせ、CSVの各フィールド値がどのOCRテキスト片に対応するかを判定して、
 該当箇所に矩形マークを付けた画像を出力する。
 
-CSVファイル自体は読み取り専用（内容は書き換えない。そのまま会計ソフトへ取り込む）。
+CSVファイル自体は照合対象としてのみ読み込むが、claude.aiのCSVダウンロード仕様回避のために
+埋め込まれた全角ハイフン「－」（空欄プレースホルダー）は空文字列へ置換したうえで元のパスへ
+上書き保存する（会計ソフトへは「－」を残さずそのまま取り込めるようにするため）。
 
 照合方式（フィールドごと）:
   - total_amount / date        : 数字のみに正規化した文字列の完全一致
@@ -39,7 +41,8 @@ from PIL import Image, ImageDraw, ImageFont
 FUZZY_THRESHOLD = 80  # RapidFuzz WRatio は0〜100
 
 # claude.aiのCSVダウンロード機能が空文字列セルを含む行を落とす事象への対処として、
-# プロンプト側で「空欄」の代わりに出力させている全角ハイフン。読み込み直後に空文字列へ戻す。
+# プロンプト側で「空欄」の代わりに出力させている全角ハイフン。読み込み直後に空文字列へ戻し、
+# 会計ソフト取込用の実ファイルにも反映されるよう元のCSVパスへ上書き保存する。
 _BLANK_PLACEHOLDER = "－"
 
 FIELD_COLORS = {
@@ -81,11 +84,25 @@ def parse_claude_csv_text(text: str) -> List[Dict[str, str]]:
     return rows
 
 
+def save_claude_csv(path: str, rows: List[Dict[str, str]]) -> None:
+    """空欄プレースホルダーを置換した内容を、元のCSVと同じ形式（cp932）で上書き保存する。"""
+    if not rows:
+        return
+    fieldnames = list(rows[0].keys())
+    with open(path, "w", newline="", encoding="cp932") as f:
+        writer = csv.DictWriter(f, fieldnames=fieldnames)
+        writer.writeheader()
+        writer.writerows(rows)
+
+
 def load_claude_csv(path: str) -> List[Dict[str, str]]:
     # claude.aiにはCSVをShift-JIS(cp932)で出力するよう指示しているため、それを前提に読む。
     with open(path, "r", newline="", encoding="cp932") as f:
         text = f.read()
-    return parse_claude_csv_text(text)
+    rows = parse_claude_csv_text(text)
+    if _BLANK_PLACEHOLDER in text:
+        save_claude_csv(path, rows)
+    return rows
 
 
 def load_positions_json(path: str) -> Dict[str, Any]:
