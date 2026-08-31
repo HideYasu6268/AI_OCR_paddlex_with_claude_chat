@@ -1,6 +1,13 @@
 # PaddleOCR本体と推論エンジン
 paddlepaddle>=2.6.0
 paddleocr>=2.8.0
+paddle2onnx>=2.1.0
+
+# OCR推論の高速化（OpenVINO Execution Provider経由でONNX Runtimeを使用）
+# onnxruntime-openvinoが同梱するOpenVINOバイナリのバージョンに合わせて
+# openvinoのバージョンを固定する必要がある（ズレるとEPが読み込めない）。
+onnxruntime-openvino==1.24.1
+openvino==2025.4.1
 
 # 画像読み込み・矩形マーキング
 pillow>=10.0.0
