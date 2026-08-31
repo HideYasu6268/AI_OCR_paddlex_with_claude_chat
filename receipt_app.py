@@ -10,7 +10,7 @@ receipt_app.py
           → そのJSON全体をクリップボードにコピー
           → 既定ブラウザで claude.ai の新規シークレットチャットを開く
           → チャットに貼り付けるだけで完結（別途プロンプトを貼る必要なし）
-  ②    : Claudeが返したCSVを貼り付け → ①のJSONと突合 → 画像フォルダ/marked にマーク画像出力
+  ②    : Claudeが出力したCSVファイルを参照で選択 → ①のJSONと突合 → 画像フォルダ/marked にマーク画像出力
 
 目視確認・CSV修正はアプリ内では行わない（Windowsフォトアプリ＋Excelで直接行う運用）。
 """
@@ -51,6 +51,7 @@ class ReceiptApp(tk.Tk):
 
         self.images_dir_var = tk.StringVar()
         self.model_dir_var = tk.StringVar(value=_DEFAULT_MODELS_DIR)
+        self.csv_path_var = tk.StringVar()
 
         self._build_ui()
 
@@ -92,7 +93,12 @@ class ReceiptApp(tk.Tk):
 
         row3 = ttk.Frame(step2)
         row3.pack(fill="x", padx=6, pady=6)
-        ttk.Button(row3, text="② CSV貼り付け→実行", command=self.on_step2).pack(side="left")
+        ttk.Entry(row3, textvariable=self.csv_path_var, width=48).pack(side="left", fill="x", expand=True)
+        ttk.Button(row3, text="参照…", command=self._browse_csv_path).pack(side="left", padx=(6, 0))
+
+        row4 = ttk.Frame(step2)
+        row4.pack(fill="x", padx=6, pady=(0, 6))
+        ttk.Button(row4, text="② 突合・マーク実行", command=self.on_step2).pack(side="left")
 
         self.step2_status = tk.StringVar(value="未実行")
         ttk.Label(step2, textvariable=self.step2_status, foreground="#555555").pack(
@@ -107,6 +113,14 @@ class ReceiptApp(tk.Tk):
         d = filedialog.askdirectory(title="モデルフォルダを選択")
         if d:
             self.model_dir_var.set(d)
+
+    def _browse_csv_path(self):
+        f = filedialog.askopenfilename(
+            title="Claudeが出力したCSVファイルを選択",
+            filetypes=[("CSVファイル", "*.csv"), ("すべてのファイル", "*.*")],
+        )
+        if f:
+            self.csv_path_var.set(f)
 
     # ──────────────────────────────
     # ① OCR実行
@@ -292,7 +306,7 @@ class ReceiptApp(tk.Tk):
         json_text = json.dumps(data, ensure_ascii=False, indent=2)
         lead_in = (
             "以下のJSONの instructions フィールドに従って、"
-            "CSVのみを出力してください。"
+            "CSVファイルとして出力してください。"
             "確認や質問は不要です。\n\n"
         )
         full_text = lead_in + json_text
@@ -301,68 +315,8 @@ class ReceiptApp(tk.Tk):
         self.update()
 
     # ──────────────────────────────
-    # ② CSV貼り付け → 突合 → マーク画像生成
+    # ② CSV参照 → 突合 → マーク画像生成
     # ──────────────────────────────
-    def _ask_paste_csv(self) -> Optional[str]:
-        dlg = tk.Toplevel(self)
-        dlg.title("CSV貼り付け")
-        dlg.transient(self)
-        dlg.grab_set()
-        dlg.geometry("700x480")
-
-        frm = ttk.Frame(dlg, padding=12)
-        frm.pack(fill="both", expand=True)
-
-        ttk.Label(frm, text="claude.aiが返したCSVテキストをこの欄に貼り付けてください（Ctrl+V）。",
-                  font=("", 9)).pack(anchor="w")
-        ttk.Label(
-            frm,
-            text=("ヘッダー行: Index,date,description,total_amount,taxrate,"
-                  "ship_to_name,invoice_registered,warning_flag"),
-            foreground="#555555", font=("", 8),
-        ).pack(anchor="w", pady=(0, 6))
-
-        txt = tk.Text(frm, height=20, wrap="none", font=("Consolas", 9))
-        sb_y = ttk.Scrollbar(frm, orient="vertical", command=txt.yview)
-        sb_x = ttk.Scrollbar(frm, orient="horizontal", command=txt.xview)
-        txt.configure(yscrollcommand=sb_y.set, xscrollcommand=sb_x.set)
-        sb_y.pack(side="right", fill="y")
-        txt.pack(side="top", fill="both", expand=True)
-        sb_x.pack(side="top", fill="x")
-        txt.focus_set()
-
-        result: List[Optional[str]] = [None]
-
-        def on_paste_from_clipboard():
-            try:
-                clip = self.clipboard_get()
-            except tk.TclError:
-                messagebox.showwarning("クリップボード", "クリップボードにテキストがありません。", parent=dlg)
-                return
-            txt.delete("1.0", "end")
-            txt.insert("1.0", clip)
-
-        def on_ok():
-            content = txt.get("1.0", "end")
-            if not content.strip():
-                messagebox.showwarning("入力エラー", "CSVテキストを貼り付けてください。", parent=dlg)
-                return
-            result[0] = content
-            dlg.destroy()
-
-        def on_cancel():
-            dlg.destroy()
-
-        btn_row = ttk.Frame(frm)
-        btn_row.pack(pady=(8, 0))
-        ttk.Button(btn_row, text="クリップボードから貼り付け",
-                   command=on_paste_from_clipboard).pack(side="left", padx=4)
-        ttk.Button(btn_row, text="OK", command=on_ok).pack(side="left", padx=4)
-        ttk.Button(btn_row, text="キャンセル", command=on_cancel).pack(side="left", padx=4)
-
-        dlg.wait_window()
-        return result[0]
-
     def on_step2(self):
         images_dir = self.images_dir_var.get().strip()
         if not images_dir or not os.path.isdir(images_dir):
@@ -373,8 +327,9 @@ class ReceiptApp(tk.Tk):
                 "エラー", f"位置情報JSONが見つかりません。先に①を実行してください。\n{_JSON_PATH}")
             return
 
-        csv_text = self._ask_paste_csv()
-        if not csv_text:
+        csv_path = self.csv_path_var.get().strip()
+        if not csv_path or not os.path.isfile(csv_path):
+            messagebox.showerror("エラー", "Claudeが出力したCSVファイルを正しく指定してください。")
             return
 
         out_dir = os.path.join(images_dir, "marked")
@@ -382,7 +337,7 @@ class ReceiptApp(tk.Tk):
         self.step2_status.set("突合・マーク画像生成中…")
         self.update_idletasks()
         try:
-            result = match_and_mark.run_from_text(csv_text, _JSON_PATH, images_dir, out_dir)
+            result = match_and_mark.run(csv_path, _JSON_PATH, images_dir, out_dir)
         except Exception as e:
             traceback.print_exc()
             messagebox.showerror("処理エラー", f"突合処理に失敗しました。\n{e}")

@@ -303,13 +303,6 @@ def run(csv_path: str, json_path: str, images_dir: str, out_dir: str) -> Dict[st
     return run_from_rows(csv_rows, data, images_dir, out_dir)
 
 
-def run_from_text(csv_text: str, json_path: str, images_dir: str, out_dir: str) -> Dict[str, Any]:
-    """claude.aiから貼り付けたCSVテキストを直接処理するエントリポイント（GUI用）。"""
-    csv_rows = parse_claude_csv_text(csv_text)
-    data = load_positions_json(json_path)
-    return run_from_rows(csv_rows, data, images_dir, out_dir)
-
-
 def run_from_rows(csv_rows: List[Dict[str, str]], data: Dict[str, Any],
                    images_dir: str, out_dir: str) -> Dict[str, Any]:
     if not csv_rows:
