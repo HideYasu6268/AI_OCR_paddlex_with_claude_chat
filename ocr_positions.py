@@ -140,9 +140,11 @@ class OcrPositionExtractor:
         file_name = os.path.basename(image_path)
         width, height = self._image_size(image_path)
         items: List[Dict[str, Any]] = []
+        angle = 0
         try:
             result = list(self.ocr.predict(image_path))
             items = self._extract_items(result)
+            angle = self._extract_angle(result)
         except Exception as e:
             traceback.print_exc()
             return {
@@ -150,6 +152,7 @@ class OcrPositionExtractor:
                 "file_name": file_name,
                 "width": width,
                 "height": height,
+                "angle": angle,
                 "items": items,
                 "error": str(e),
             }
@@ -158,6 +161,7 @@ class OcrPositionExtractor:
             "file_name": file_name,
             "width": width,
             "height": height,
+            "angle": angle,
             "items": items,
         }
 
@@ -167,6 +171,22 @@ class OcrPositionExtractor:
                 return img.size  # (width, height)
         except Exception:
             return (None, None)
+
+    def _extract_angle(self, ocr_result: Any) -> int:
+        """use_doc_orientation_classify=True により、rec_boxesの座標系は
+        向き補正後（このangle分だけ反時計回りに回転した後）の画像基準になる。
+        マーキング側で元画像に描画する際、この angle 分の回転補正が必要。
+        """
+        if not (isinstance(ocr_result, list) and len(ocr_result) > 0):
+            return 0
+        page = ocr_result[0]
+        try:
+            return int(page["doc_preprocessor_res"]["angle"])
+        except Exception:
+            try:
+                return int(page.doc_preprocessor_res["angle"])
+            except Exception:
+                return 0
 
     def _extract_items(self, ocr_result: Any) -> List[Dict[str, Any]]:
         items: List[Dict[str, Any]] = []

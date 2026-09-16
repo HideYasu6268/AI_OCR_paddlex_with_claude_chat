@@ -287,13 +287,40 @@ def match_fields(image_record: Dict[str, Any], csv_row: Dict[str, str]) -> Dict[
 # ──────────────────────────────────────────────
 #  画像への矩形マーキング
 # ──────────────────────────────────────────────
-def mark_image(image_path: str, entries: List[Dict[str, Any]], out_path: str) -> None:
+_ROTATE_TRANSPOSE = {
+    90: Image.ROTATE_90,
+    180: Image.ROTATE_180,
+    270: Image.ROTATE_270,
+}
+
+
+def _rotate_ccw(img: Image.Image, angle: int) -> Image.Image:
+    angle = angle % 360
+    method = _ROTATE_TRANSPOSE.get(angle)
+    if method is None:
+        return img
+    return img.transpose(method)
+
+
+def mark_image(image_path: str, entries: List[Dict[str, Any]], out_path: str,
+                angle: int = 0) -> None:
     """entries: [{"field":.., "box":.., "label":..}, ...]
     1枚の画像に複数CSV行分のマークをまとめて描画できるよう、
     フィールド名固定のdictではなくリスト形式で受け取る
     （軽減税率混在で1画像に2行が対応するケースをマージするため）。
+
+    angle: OCR時にuse_doc_orientation_classifyが判定した向き補正角度
+    （反時計回りの度数、0/90/180/270）。boxの座標系はこの補正後の画像
+    基準になっているため、元画像を同じ向きに回転してから描画する。
+    出力画像もそのまま補正後（正立）の向きで保存する。
     """
     img = Image.open(image_path).convert("RGB")
+    angle = angle % 360 if isinstance(angle, int) else 0
+    if angle not in _ROTATE_TRANSPOSE:
+        angle = 0
+    if angle:
+        img = _rotate_ccw(img, angle)
+
     draw = ImageDraw.Draw(img)
     try:
         font = ImageFont.load_default()
@@ -374,7 +401,7 @@ def run_from_rows(csv_rows: List[Dict[str, str]], data: Dict[str, Any],
         if image_path is None:
             summary["skipped_no_image"].extend(raw_label for raw_label, _ in rows_for_image)
             continue
-        if os.path.basename(image_path) != image_record["file_name"]:
+        if os.path.basename(image_path).lower() != image_record["file_name"].lower():
             summary["index_filename_mismatch"].append({
                 "index": image_idx,
                 "expected": image_record["file_name"],
@@ -410,7 +437,8 @@ def run_from_rows(csv_rows: List[Dict[str, str]], data: Dict[str, Any],
 
         base, ext = os.path.splitext(image_record["file_name"])
         out_path = os.path.join(out_dir, f"{base}_marked{ext}")
-        mark_image(image_path, mark_entries, out_path)
+        angle = image_record.get("angle", 0) or 0
+        mark_image(image_path, mark_entries, out_path, angle=angle)
         summary["output_files"].append(out_path)
 
     return summary
