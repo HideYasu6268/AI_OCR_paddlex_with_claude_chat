@@ -6,11 +6,11 @@ receipt_app.py
   上部  : 画像フォルダ（①②共通。毎回このフォルダの中身を入れ替えて使う運用）
   ①    : モデルフォルダ指定 → OCR実行 → JSON作成
           （プロンプト本文=instructions ＋ OCR結果=images を1つにまとめたJSON。
-           本スクリプトと同じディレクトリに ocr_positions.json として固定名で保存）
+           指定のJSONパス、デフォルトは ocr_positions.json として保存）
           → そのJSON全体をクリップボードにコピー
           → 既定ブラウザで claude.ai の新規シークレットチャットを開く
           → チャットに貼り付けるだけで完結（別途プロンプトを貼る必要なし）
-  ②    : Claudeが出力したCSVファイルを参照で選択 → ①のJSONと突合 → 画像フォルダ/marked にマーク画像出力
+  ②    : Claudeが出力したCSVファイル、およびOCR結果JSONファイルを参照で選択 → 突合 → 画像フォルダ/marked にマーク画像出力
 
 目視確認・CSV修正はアプリ内では行わない（Windowsフォトアプリ＋Excelで直接行う運用）。
 """
@@ -33,7 +33,8 @@ import match_and_mark
 
 _BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 _PROMPT_TEMPLATE_PATH = os.path.join(_BASE_DIR, "claude_prompt_template.txt")
-_JSON_PATH = os.path.join(_BASE_DIR, "ocr_positions.json")
+_DEFAULT_JSON_PATH = os.path.join(_BASE_DIR, "ocr_positions.json")
+_JSON_PATH = _DEFAULT_JSON_PATH
 _DEFAULT_MODELS_DIR = os.path.join(_BASE_DIR, "models")
 
 _IMAGE_EXTS = {".jpg", ".jpeg", ".png", ".bmp", ".tif", ".tiff"}
@@ -52,6 +53,7 @@ class ReceiptApp(tk.Tk):
         self.images_dir_var = tk.StringVar()
         self.model_dir_var = tk.StringVar(value=_DEFAULT_MODELS_DIR)
         self.csv_path_var = tk.StringVar()
+        self.json_path_var = tk.StringVar(value=_DEFAULT_JSON_PATH)
 
         self._build_ui()
 
@@ -73,7 +75,7 @@ class ReceiptApp(tk.Tk):
 
         row1 = ttk.Frame(step1)
         row1.pack(fill="x", padx=6, pady=(6, 2))
-        ttk.Label(row1, text="モデルフォルダ:").pack(side="left")
+        ttk.Label(row1, text="モデルフォルダ:", width=13).pack(side="left")
         ttk.Entry(row1, textvariable=self.model_dir_var, width=48).pack(side="left", fill="x", expand=True, padx=(6, 0))
         ttk.Button(row1, text="参照…", command=self._browse_model_dir).pack(side="left", padx=(6, 0))
 
@@ -92,9 +94,16 @@ class ReceiptApp(tk.Tk):
         step2.pack(fill="x", **pad)
 
         row3 = ttk.Frame(step2)
-        row3.pack(fill="x", padx=6, pady=6)
-        ttk.Entry(row3, textvariable=self.csv_path_var, width=48).pack(side="left", fill="x", expand=True)
+        row3.pack(fill="x", padx=6, pady=(6, 2))
+        ttk.Label(row3, text="CSVファイル:", width=13).pack(side="left")
+        ttk.Entry(row3, textvariable=self.csv_path_var, width=48).pack(side="left", fill="x", expand=True, padx=(6, 0))
         ttk.Button(row3, text="参照…", command=self._browse_csv_path).pack(side="left", padx=(6, 0))
+
+        row_json = ttk.Frame(step2)
+        row_json.pack(fill="x", padx=6, pady=(2, 6))
+        ttk.Label(row_json, text="OCR結果JSON:", width=13).pack(side="left")
+        ttk.Entry(row_json, textvariable=self.json_path_var, width=48).pack(side="left", fill="x", expand=True, padx=(6, 0))
+        ttk.Button(row_json, text="参照…", command=self._browse_json_path).pack(side="left", padx=(6, 0))
 
         row4 = ttk.Frame(step2)
         row4.pack(fill="x", padx=6, pady=(0, 6))
@@ -121,6 +130,14 @@ class ReceiptApp(tk.Tk):
         )
         if f:
             self.csv_path_var.set(f)
+
+    def _browse_json_path(self):
+        f = filedialog.askopenfilename(
+            title="OCR結果のJSONファイルを選択",
+            filetypes=[("JSONファイル", "*.json"), ("すべてのファイル", "*.*")],
+        )
+        if f:
+            self.json_path_var.set(f)
 
     # ──────────────────────────────
     # ① OCR実行
@@ -278,8 +295,10 @@ class ReceiptApp(tk.Tk):
             return
 
         data = {"instructions": instructions, "images": images_result}
+        json_path = self.json_path_var.get().strip() or _DEFAULT_JSON_PATH
         try:
-            save_json(data, _JSON_PATH)
+            save_json(data, json_path)
+            self.json_path_var.set(json_path)
         except Exception as e:
             traceback.print_exc()
             messagebox.showerror("保存エラー", f"JSONの保存に失敗しました。\n{e}")
@@ -292,7 +311,7 @@ class ReceiptApp(tk.Tk):
             pass
 
         self.step1_status.set(
-            f"完了（{len(images_result)}枚）: {_JSON_PATH}（プロンプト込みJSONをクリップボードにコピー済み）")
+            f"完了（{len(images_result)}枚）: {json_path}（プロンプト込みJSONをクリップボードにコピー済み）")
 
     def _copy_json_to_clipboard(self, data: Dict[str, Any]):
         """プロンプト（instructions）とOCR結果（images）を1つに含んだJSONを
@@ -322,9 +341,13 @@ class ReceiptApp(tk.Tk):
         if not images_dir or not os.path.isdir(images_dir):
             messagebox.showerror("エラー", "画像フォルダを正しく指定してください。")
             return
-        if not os.path.exists(_JSON_PATH):
+
+        json_path = self.json_path_var.get().strip()
+        if not json_path or not os.path.isfile(json_path):
             messagebox.showerror(
-                "エラー", f"位置情報JSONが見つかりません。先に①を実行してください。\n{_JSON_PATH}")
+                "エラー",
+                f"OCR結果JSONファイルが見つかりません。先に①を実行するか、正しいファイルを指定してください。\n{json_path}"
+            )
             return
 
         csv_path = self.csv_path_var.get().strip()
@@ -337,7 +360,7 @@ class ReceiptApp(tk.Tk):
         self.step2_status.set("突合・マーク画像生成中…")
         self.update_idletasks()
         try:
-            result = match_and_mark.run(csv_path, _JSON_PATH, images_dir, out_dir)
+            result = match_and_mark.run(csv_path, json_path, images_dir, out_dir)
         except Exception as e:
             traceback.print_exc()
             messagebox.showerror("処理エラー", f"突合処理に失敗しました。\n{e}")
