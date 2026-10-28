@@ -14,3 +14,6 @@ pillow>=10.0.0
 
 # CSVフィールドとOCRテキストのあいまい一致
 rapidfuzz>=3.0.0
+
+# PDFテキスト抽出（仕訳辞書確認表PDFのCSV変換用）
+pdfplumber>=0.11.0
