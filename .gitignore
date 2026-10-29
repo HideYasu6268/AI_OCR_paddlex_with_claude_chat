@@ -7,6 +7,8 @@ marked/
 *.csv
 仕訳辞書確認表.csv
 *.txt
+!claude_prompt_template.txt
+!使い方.txt
 *.pdf
 
 # テスト用画像フォルダ（領収書の実データを含むため管理しない）
