@@ -2,17 +2,15 @@
 """
 receipt_app.py
 
-最小限のUI:
-  上部  : 画像フォルダ（①②共通。毎回このフォルダの中身を入れ替えて使う運用）
-  ①    : モデルフォルダ指定 → OCR実行 → JSON作成
-          （プロンプト本文=instructions ＋ OCR結果=images を1つにまとめたJSON。
-           指定のJSONパス、デフォルトは ocr_positions.json として保存）
-          → そのJSON全体をクリップボードにコピー
-          → 既定ブラウザで claude.ai の新規シークレットチャットを開く
-          → チャットに貼り付けるだけで完結（別途プロンプトを貼る必要なし）
-  ②    : Claudeが出力したCSVファイル、およびOCR結果JSONファイルを参照で選択 → 突合 → 画像フォルダ/marked にマーク画像出力
+領収書OCR → Claude → CSV突合マーク → 会計ソフト仕訳インポートtxt作成 デスクトップアプリ
 
-目視確認・CSV修正はアプリ内では行わない（Windowsフォトアプリ＋Excelで直接行う運用）。
+ワークフロー:
+  ⓪ 事前準備: 過去仕訳データ（siwake.txt）をフィルタ・重複排除し、siwake_filtered.txt を作成
+  画像フォルダ: ①②共通の領収書画像フォルダを指定
+  ① OCR実行 : 画像群をPaddleOCRで読み取り、プロンプト込みJSONを作成 → クリップボードにコピー & claude.ai を開く
+  ② CSV突合 : Claudeが出力したCSVとOCR結果JSONを突合し、画像上にマーキング
+  ③ 仕訳作成 : 突合後CSVとフィルタ済み仕訳を突き合わせ、会計取込用仕訳データ（siwake_matched.txt）を作成
+              マッチした行はCSVから削除され、未マッチ行のみが元CSVに上書き保存される
 """
 
 import sys
@@ -36,6 +34,10 @@ _PROMPT_TEMPLATE_PATH = os.path.join(_BASE_DIR, "claude_prompt_template.txt")
 _DEFAULT_JSON_PATH = os.path.join(_BASE_DIR, "ocr_positions.json")
 _JSON_PATH = _DEFAULT_JSON_PATH
 _DEFAULT_MODELS_DIR = os.path.join(_BASE_DIR, "models")
+_DEFAULT_SIWAKE_PATH = os.path.join(_BASE_DIR, "siwake.txt")
+_DEFAULT_FILTERED_PATH = os.path.join(_BASE_DIR, "siwake_filtered.txt")
+_DEFAULT_MATCHED_PATH = os.path.join(_BASE_DIR, "siwake_matched.txt")
+_DEFAULT_CSV_PATH = os.path.join(_BASE_DIR, "receipts_accounting.csv")
 
 _IMAGE_EXTS = {".jpg", ".jpeg", ".png", ".bmp", ".tif", ".tiff"}
 
@@ -44,15 +46,25 @@ class ReceiptApp(tk.Tk):
 
     def __init__(self):
         super().__init__()
-        self.title("領収書OCR → Claude → CSV突合マーク")
+        self.title("領収書OCR → Claude → 会計仕訳作成")
         self.resizable(False, False)
 
         self._extractor = None  # OcrPositionExtractor（遅延import・遅延初期化）
         self._extractor_model_dir = None  # 初期化に使ったモデルフォルダ（切替検知用）
 
+        self.siwake_path_var = tk.StringVar(
+            value=_DEFAULT_SIWAKE_PATH if os.path.exists(_DEFAULT_SIWAKE_PATH) else ""
+        )
+        self.filtered_path_var = tk.StringVar(
+            value=_DEFAULT_FILTERED_PATH if os.path.exists(_DEFAULT_FILTERED_PATH) else ""
+        )
+        self.matched_path_var = tk.StringVar(value=_DEFAULT_MATCHED_PATH)
+
         self.images_dir_var = tk.StringVar()
         self.model_dir_var = tk.StringVar(value=_DEFAULT_MODELS_DIR)
-        self.csv_path_var = tk.StringVar()
+        self.csv_path_var = tk.StringVar(
+            value=_DEFAULT_CSV_PATH if os.path.exists(_DEFAULT_CSV_PATH) else ""
+        )
         self.json_path_var = tk.StringVar(value=_DEFAULT_JSON_PATH)
 
         self._build_ui()
@@ -63,6 +75,26 @@ class ReceiptApp(tk.Tk):
     def _build_ui(self):
         pad = {"padx": 8, "pady": 4}
 
+        # ── ⓪ 事前準備: 過去仕訳フィルタ ──
+        step0 = ttk.LabelFrame(self, text="⓪ 事前準備: 過去仕訳データフィルタ（重複排除）")
+        step0.pack(fill="x", **pad)
+
+        row0_1 = ttk.Frame(step0)
+        row0_1.pack(fill="x", padx=6, pady=(6, 2))
+        ttk.Label(row0_1, text="過去仕訳TXT:", width=13).pack(side="left")
+        ttk.Entry(row0_1, textvariable=self.siwake_path_var, width=48).pack(side="left", fill="x", expand=True, padx=(6, 0))
+        ttk.Button(row0_1, text="参照…", command=self._browse_siwake_path).pack(side="left", padx=(6, 0))
+
+        row0_2 = ttk.Frame(step0)
+        row0_2.pack(fill="x", padx=6, pady=(2, 4))
+        self.step0_btn = ttk.Button(row0_2, text="⓪ 過去仕訳フィルタ実行", command=self.on_step0)
+        self.step0_btn.pack(side="left")
+
+        self.step0_status = tk.StringVar(value="未実行（初回または過去仕訳更新時に実行）")
+        ttk.Label(step0, textvariable=self.step0_status, foreground="#555555").pack(
+            anchor="w", padx=6, pady=(0, 6))
+
+        # ── 画像フォルダ（①②共通） ──
         common = ttk.LabelFrame(self, text="画像フォルダ（①②共通）")
         common.pack(fill="x", **pad)
         row = ttk.Frame(common)
@@ -70,6 +102,7 @@ class ReceiptApp(tk.Tk):
         ttk.Entry(row, textvariable=self.images_dir_var, width=60).pack(side="left", fill="x", expand=True)
         ttk.Button(row, text="参照…", command=self._browse_images_dir).pack(side="left", padx=(6, 0))
 
+        # ── ① OCR実行 ──
         step1 = ttk.LabelFrame(self, text="① OCR実行 → JSON作成 → Claudeへ")
         step1.pack(fill="x", **pad)
 
@@ -90,6 +123,7 @@ class ReceiptApp(tk.Tk):
         ttk.Label(step1, textvariable=self.step1_status, foreground="#555555").pack(
             anchor="w", padx=6, pady=(0, 6))
 
+        # ── ② CSV突合・マーク画像生成 ──
         step2 = ttk.LabelFrame(self, text="② CSV突合 → マーク画像生成")
         step2.pack(fill="x", **pad)
 
@@ -112,6 +146,41 @@ class ReceiptApp(tk.Tk):
         self.step2_status = tk.StringVar(value="未実行")
         ttk.Label(step2, textvariable=self.step2_status, foreground="#555555").pack(
             anchor="w", padx=6, pady=(0, 6))
+
+        # ── ③ 突合後CSV → インポートtxt作成 ──
+        step3 = ttk.LabelFrame(self, text="③ 突合後CSV → インポートtxtファイル作成")
+        step3.pack(fill="x", **pad)
+
+        row3_1 = ttk.Frame(step3)
+        row3_1.pack(fill="x", padx=6, pady=(6, 2))
+        ttk.Label(row3_1, text="フィルタ済仕訳:", width=13).pack(side="left")
+        ttk.Entry(row3_1, textvariable=self.filtered_path_var, width=48).pack(side="left", fill="x", expand=True, padx=(6, 0))
+        ttk.Button(row3_1, text="参照…", command=self._browse_filtered_path).pack(side="left", padx=(6, 0))
+
+        row3_2 = ttk.Frame(step3)
+        row3_2.pack(fill="x", padx=6, pady=(2, 6))
+        self.step3_btn = ttk.Button(row3_2, text="③ インポートtxt作成", command=self.on_step3)
+        self.step3_btn.pack(side="left")
+
+        self.step3_status = tk.StringVar(value="未実行（マッチ行を仕訳txtに出力し、元CSVから削除）")
+        ttk.Label(step3, textvariable=self.step3_status, foreground="#555555").pack(
+            anchor="w", padx=6, pady=(0, 6))
+
+    def _browse_siwake_path(self):
+        f = filedialog.askopenfilename(
+            title="過去仕訳TXTファイル（siwake.txt）を選択",
+            filetypes=[("テキストファイル", "*.txt"), ("すべてのファイル", "*.*")],
+        )
+        if f:
+            self.siwake_path_var.set(f)
+
+    def _browse_filtered_path(self):
+        f = filedialog.askopenfilename(
+            title="フィルタ済み仕訳ファイルを選択",
+            filetypes=[("テキストファイル", "*.txt"), ("すべてのファイル", "*.*")],
+        )
+        if f:
+            self.filtered_path_var.set(f)
 
     def _browse_images_dir(self):
         d = filedialog.askdirectory(title="画像フォルダを選択")
@@ -399,6 +468,116 @@ class ReceiptApp(tk.Tk):
         if skipped:
             lines.append(f"画像が見つからずスキップ: {skipped}")
         messagebox.showinfo("突合結果", "\n".join(lines))
+
+    # ──────────────────────────────
+    # ⓪ 過去仕訳データフィルタ（重複排除）
+    # ──────────────────────────────
+    def on_step0(self):
+        siwake_path = self.siwake_path_var.get().strip()
+        if not siwake_path or not os.path.isfile(siwake_path):
+            messagebox.showerror("エラー", "過去仕訳TXTファイル（siwake.txt）を正しく指定してください。")
+            return
+
+        out_path = self.filtered_path_var.get().strip() or _DEFAULT_FILTERED_PATH
+
+        self.step0_btn.config(state="disabled")
+        self.step0_status.set("フィルタ・重複排除処理中…")
+
+        def _worker():
+            try:
+                import filter_siwake
+                res = filter_siwake.run_filter_siwake(
+                    src=siwake_path,
+                    dst=out_path,
+                    progress_cb=lambda msg: self.step0_status.set(msg),
+                )
+                self.after(0, lambda: self._finish_step0(res))
+            except Exception as e:
+                traceback.print_exc()
+                self.after(0, lambda: self._error_step0(str(e)))
+
+        threading.Thread(target=_worker, daemon=True).start()
+
+    def _finish_step0(self, res: dict):
+        self.step0_btn.config(state="normal")
+        self.filtered_path_var.set(res["dst"])
+        self.siwake_path_var.set("")
+        self.step0_status.set(f"完了（{res['deduped']}件）: {os.path.basename(res['dst'])}")
+        msg = (
+            f"過去仕訳フィルタ完了:\n"
+            f"  元データ: {res['total']} 件\n"
+            f"  貸方1101フィルタ後: {res['filtered']} 件\n"
+            f"  重複排除後: {res['deduped']} 件\n\n"
+            f"出力先: {res['dst']}"
+        )
+        messagebox.showinfo("事前準備完了", msg)
+
+    def _error_step0(self, err: str):
+        self.step0_btn.config(state="normal")
+        self.step0_status.set("エラーで中断しました。")
+        messagebox.showerror("エラー", f"過去仕訳フィルタ処理に失敗しました。\n{err}")
+
+    # ──────────────────────────────
+    # ③ 突合後CSV → インポートtxt作成
+    # ──────────────────────────────
+    def on_step3(self):
+        csv_path = self.csv_path_var.get().strip()
+        if not csv_path or not os.path.isfile(csv_path):
+            if os.path.isfile(_DEFAULT_CSV_PATH):
+                csv_path = _DEFAULT_CSV_PATH
+                self.csv_path_var.set(csv_path)
+            else:
+                messagebox.showerror("エラー", "対象のCSVファイル（②で突合したCSV等）を指定してください。")
+                return
+
+        filtered_path = self.filtered_path_var.get().strip()
+        if not filtered_path or not os.path.isfile(filtered_path):
+            messagebox.showerror("エラー", "フィルタ済み仕訳ファイルが見つかりません。先に⓪を実行してください。")
+            return
+
+        out_txt_path = self.matched_path_var.get().strip() or _DEFAULT_MATCHED_PATH
+
+        self.step3_btn.config(state="disabled")
+        self.step3_status.set("インポートtxt作成処理中…")
+
+        def _worker():
+            try:
+                import match_receipts
+                res = match_receipts.run_match_receipts(
+                    csv_path=csv_path,
+                    siwake_path=filtered_path,
+                    out_txt_path=out_txt_path,
+                    progress_cb=lambda msg: self.step3_status.set(msg),
+                )
+                self.after(0, lambda: self._finish_step3(res))
+            except Exception as e:
+                traceback.print_exc()
+                self.after(0, lambda: self._error_step3(str(e)))
+
+        threading.Thread(target=_worker, daemon=True).start()
+
+    def _finish_step3(self, res: dict):
+        self.step3_btn.config(state="normal")
+        msg = (
+            f"仕訳データ作成完了:\n\n"
+            f"【突合結果】\n"
+            f"  対象CSV件数: {res['total']} 件\n"
+            f"  マッチ件数: {res['matched']} 件（完全一致: {res['exact']} 件, 部分一致: {res['fuzzy']} 件）\n"
+            f"  未マッチ件数: {res['unmatched']} 件\n\n"
+            f"【出力内容】\n"
+            f"  -> 会計取込用仕訳: {res['out_txt_path']}\n"
+            f"  -> 未マッチCSV（上書き）: {res['csv_path']}\n"
+            f"     （マッチした {res['matched']} 件はCSVから削除されました）"
+        )
+        self.step3_status.set(
+            f"完了: マッチ {res['matched']} 件（仕訳出力） / 残り {res['unmatched']} 件（CSV上書き）"
+        )
+        messagebox.showinfo("インポートtxt作成完了", msg)
+
+    def _error_step3(self, err: str):
+        self.step3_btn.config(state="normal")
+        self.step3_status.set("エラーで中断しました。")
+        messagebox.showerror("エラー", f"インポートtxt作成処理に失敗しました。\n{err}")
 
 
 if __name__ == "__main__":

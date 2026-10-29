@@ -1,6 +1,8 @@
-# PaddleOCR本体と推論エンジン
-paddlepaddle>=2.6.0
-paddleocr>=2.8.0
+# PaddlePaddle / PaddleOCR / PaddleX
+# ※新しいバージョンではPIRとoneDNNの非互換による推論エラーが発生するためバージョン固定
+paddlepaddle==3.1.0
+paddleocr==3.6.0
+paddlex==3.6.1
 paddle2onnx>=2.1.0
 
 # OCR推論の高速化（OpenVINO Execution Provider経由でONNX Runtimeを使用）
@@ -14,6 +16,3 @@ pillow>=10.0.0
 
 # CSVフィールドとOCRテキストのあいまい一致
 rapidfuzz>=3.0.0
-
-# PDFテキスト抽出（仕訳辞書確認表PDFのCSV変換用）
-pdfplumber>=0.11.0
