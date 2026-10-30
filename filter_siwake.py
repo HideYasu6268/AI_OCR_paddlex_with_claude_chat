@@ -2,7 +2,7 @@
 """
 siwake.txt フィルタリング&重複排除スクリプト
 
-1. 列11（貸方補助コード）が "1101" の行のみ残す
+1. 列11（貸方補助コード）が "1101" かつ 列9（借方税区分）が "810", "511", "512", "540" の行のみ残す
 2. 取引先名を正規化（match_receipts.py と同一ロジック: 株式会社->㈱、半角全角統一、空白除去等）
 3. 取引先・借方科目コード・借方税区分 が同じものは、
    21カラム目の「摘要」が最も抽象的に表現されている行をGroq APIで判定して残す
@@ -35,6 +35,10 @@ from pathlib import Path
 FILTER_COL = 11        # 貸方補助コード
 FILTER_VAL = "1101"
 
+# 借方税区分のフィルタ対象（810, 511, 512, 540 のみ残す）
+TAX_CAT_COL = 9        # 借方税区分
+TAX_CAT_VALS = {"810", "511", "512", "540"}
+
 # 摘要の列インデックス
 DESC_COL = 21          # 摘要
 
@@ -45,7 +49,7 @@ PARTNER_COL = 22       # 取引先名
 DEDUP_COLS = {
     "取引先":        PARTNER_COL,  # 取引先名（正規化後）
     "借方科目コード":   6,            # 借方科目コード（補助コード: 1112 など）
-    "借方税区分":      9,            # 借方税区分（810 など）
+    "借方税区分":      TAX_CAT_COL,  # 借方税区分（810, 511, 512, 540）
     "税率区分":       20,           # 軽減税率区分（4=軽減8%, 0=標準10%）
 }
 
@@ -197,19 +201,22 @@ def run_filter_siwake(src: Path | str, dst: Path | str | None = None, progress_c
     if progress_cb:
         progress_cb("過去仕訳データ読み込み・フィルタ中…")
 
-    # ---- Step1: 貸方補助コード == "1101" でフィルタ ----
+    # ---- Step1: 貸方補助コード == "1101" かつ 借方税区分 in {"810", "511", "512", "540"} でフィルタ ----
+    min_req_cols = max(FILTER_COL, TAX_CAT_COL)
     with open(src, encoding=enc, errors="replace", newline="") as f:
         for line in f:
             line_stripped = line.rstrip("\r\n")
             if not line_stripped:
                 continue
             cols = line_stripped.split("\t")
-            if len(cols) <= FILTER_COL:
+            if len(cols) <= min_req_cols:
                 if not header_line and total == 0:
                     header_line = line_stripped
                 continue
             total += 1
-            if cols[FILTER_COL] == FILTER_VAL:
+            credit_sub = cols[FILTER_COL].strip('" \t')
+            debit_tax = cols[TAX_CAT_COL].strip('" \t')
+            if credit_sub == FILTER_VAL and debit_tax in TAX_CAT_VALS:
                 filtered.append(cols)
 
     # ---- Step2: 取引先名の正規化 -> 重複排除 ----
