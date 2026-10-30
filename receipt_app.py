@@ -508,7 +508,8 @@ class ReceiptApp(tk.Tk):
             f"  元データ: {res['total']} 件\n"
             f"  貸方1101フィルタ後: {res['filtered']} 件\n"
             f"  重複排除後: {res['deduped']} 件\n\n"
-            f"出力先: {res['dst']}"
+            f"出力先: {res['dst']}\n"
+            f"（③の参照先にも自動設定しました）"
         )
         messagebox.showinfo("事前準備完了", msg)
 
